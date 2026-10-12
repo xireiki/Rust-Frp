@@ -13,6 +13,8 @@
 
 ---
 
+> 相比上游，添加了监听 25565 时自动探测并转发到 Minecraft 局域网游戏的功能，但 NFrp 不应该拥有此功能，请不要就此功能向上游（Nu0vo1212/Rust-Frp）提交 issues 或者 pull request
+
 NFrp 是 [fatedier/frp](https://github.com/fatedier/frp) 的 Rust 重实现，**完整兼容官方 wire protocol v1 与 v2**，可与官方 `frps` / `frpc`（v0.71.0 实测）直接互通，第三方 frp 平台下发的配置也能直接用。
 
 默认走 **v1**，与官方 frp 的默认值一致 —— 所以官方客户端 / 服务端**不需要改任何配置**就能连上。

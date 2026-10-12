@@ -552,8 +552,16 @@ mod tests {
         assert!(sink_from_config("", 3).is_none());
         assert!(sink_from_config("console", 3).is_none());
         assert!(sink_from_config("CONSOLE", 3).is_none());
-        // 打不开的路径也不 panic，只是回落
-        assert!(sink_from_config("Z:/definitely/not/here/x.log", 3).is_none());
+        // 打不开的路径也不 panic，只是回落。
+        // 不能用 "Z:/..." 这种 Windows 盘符来构造"打不开"：在 Unix 上它只是
+        // 当前目录下一个可创建的相对路径，断言会因平台而异（macOS/Linux 上曾
+        // 因此误报失败）。改用「父路径是个文件」，任何平台都必然打不开。
+        let d = tmpdir("sink-badpath");
+        let blocker = d.join("blocker");
+        fs::write(&blocker, b"x").unwrap();
+        let bad = blocker.join("x.log");
+        assert!(sink_from_config(bad.to_str().unwrap(), 3).is_none());
+        fs::remove_dir_all(&d).ok();
     }
 
     #[test]

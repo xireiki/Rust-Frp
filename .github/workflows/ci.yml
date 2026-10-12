@@ -90,6 +90,8 @@ jobs:
           tool: cross
 
       - name: build --release
+        env:
+          CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE: ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
         run: cross build --release --workspace --target ${{ matrix.target }}
         timeout-minutes: 30
 
