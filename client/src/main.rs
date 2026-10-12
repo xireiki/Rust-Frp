@@ -7,6 +7,7 @@
 //! （作为接入方）。
 
 mod health;
+mod mc_lan;
 mod p2p;
 mod plugin;
 mod plugin_bridge;
@@ -262,6 +263,22 @@ async fn main() -> Result<()> {
     // 健康检查是进程级的：跨重连持续探测，状态不随会话重建而丢失
     let health = health::Monitor::start(&cfg);
 
+    // Minecraft 局域网广播监听：进程级常驻，跨会话重连持续有效。
+    //
+    // 只在有代理把本地端口写成 25565 时才有实际作用（见 `mc_lan::effective_local_addr`），
+    // 但监听成本极低，且端口会变，所以无脑起一个、不做条件判断。
+    let lan = mc_lan::spawn_listener();
+    if cfg
+        .proxies
+        .iter()
+        .any(|p| mc_lan::local_port_of(&p.local_addr) == Some(mc_lan::MC_DEFAULT_PORT))
+    {
+        info!(
+            "检测到本地端口为 {} 的代理，将监听 Minecraft 局域网广播并自动跟随实际端口",
+            mc_lan::MC_DEFAULT_PORT
+        );
+    }
+
     info!(
         "nfrp-client 启动：连接 {}:{}（线协议 {}），共 {} 个代理 / {} 个访客",
         cfg.server_addr,
@@ -373,6 +390,7 @@ async fn main() -> Result<()> {
             store: store.clone(),
             proxies: proxies.clone(),
             hub: hub.clone(),
+            lan: lan.clone(),
         });
         tokio::select! {
             r = fut => {
@@ -617,10 +635,16 @@ struct ServerLink {
     quic: Option<(quinn::Endpoint, quinn::Connection)>,
     /// 本次会话协商出的 UDP 报文编码（true = 二进制），工作连接要跟着用。
     udp_binary: std::sync::atomic::AtomicBool,
+    /// Minecraft 局域网广播发现的端口（进程级共享）。
+    ///
+    /// 放在 `ServerLink` 里而不是 `SessionDeps`：所有建立工作连接的地方
+    /// （`ReqWorkConn`、预建池、面板命令）手上都攥着 `link`，从这里取最省事，
+    /// 不需求再往下多穿一个参数。
+    lan: Arc<mc_lan::LanPort>,
 }
 
 impl ServerLink {
-    async fn open(cfg: Arc<ClientConfig>) -> Result<Self> {
+    async fn open(cfg: Arc<ClientConfig>, lan: Arc<mc_lan::LanPort>) -> Result<Self> {
         let wire = cfg.protocol.wire_version().ok_or_else(|| {
             anyhow!("当前版本尚未实现 NFrp 自研协议，请把 protocol 设为 frp-v1 或 frp-v2")
         })?;
@@ -646,6 +670,7 @@ impl ServerLink {
             mux,
             quic,
             udp_binary: std::sync::atomic::AtomicBool::new(false),
+            lan,
         })
     }
 
@@ -857,6 +882,8 @@ struct SessionDeps {
     store: Arc<store::Store>,
     proxies: registry::ProxyTable,
     hub: Option<Arc<web::Hub>>,
+    /// Minecraft 局域网广播发现的端口（进程级，跨会话共享）。
+    lan: Arc<mc_lan::LanPort>,
 }
 
 async fn run_session(deps: SessionDeps) -> Result<()> {
@@ -871,9 +898,10 @@ async fn run_session(deps: SessionDeps) -> Result<()> {
         store,
         proxies,
         hub,
+        lan,
     } = deps;
     let server = format!("{}:{}", cfg.server_addr, cfg.server_port);
-    let link = Arc::new(ServerLink::open(cfg.clone()).await?);
+    let link = Arc::new(ServerLink::open(cfg.clone(), lan.clone()).await?);
     info!(%server, "已连接到服务端，开始握手");
 
     let stream = link.connect().await?;
@@ -1286,8 +1314,13 @@ async fn work_conn_flow(
         return plug.serve(work, leftover, &ctx).await;
     }
 
-    let local_addr = &proxy.local_addr;
-    let local = util::resolve_addr(local_addr)
+    // Minecraft 局域网跟随：本地端口写成 25565 时，改用广播里发现的真实端口。
+    //
+    // 这一步必须在**解析地址之前**：`local_addr` 是 `ip:port` 形式，
+    // 我们只替换端口、保留主机名（见 `mc_lan::effective_local_addr`）。
+    // 端口不是 25565、或没收到广播时返回原值，行为与不带这个功能时**完全一致**。
+    let local_addr = mc_lan::effective_local_addr(&proxy.local_addr, &link.lan);
+    let local = util::resolve_addr(&local_addr)
         .await
         .with_context(|| format!("解析内网地址 {local_addr} 失败"))?;
     let mut local_stream = TcpStream::connect(local)

@@ -491,13 +491,21 @@ pub struct LoadGuard(Arc<Load>);
 
 impl Drop for LoadGuard {
     fn drop(&mut self) {
-        // 减到 0 就停： saturating 防止异常路径上多减一次把计数打到 usize::MAX
-        self.0
-            .inflight
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
-                Some(v.saturating_sub(1))
-            })
-            .ok();
+        // 减到 0 就停： saturating 防止异常路径上多减一次把计数打到 usize::MAX。
+        // 用 CAS 循环而不是 fetch_update —— 后者已在新版 Rust 中废弃
+        // （rename 到尚未稳定的 try_update），CAS 在所有工具链上都能编。
+        let mut cur = self.0.inflight.load(Ordering::Relaxed);
+        while cur != 0 {
+            match self.0.inflight.compare_exchange_weak(
+                cur,
+                cur - 1,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 }
 

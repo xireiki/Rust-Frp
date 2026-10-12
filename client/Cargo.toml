@@ -29,6 +29,9 @@ tokio-rustls = { workspace = true }
 
 anyhow = { workspace = true }
 base64 = { workspace = true }
+# Minecraft 局域网广播监听要给 UDP socket 设 SO_REUSEADDR（多播端口可能被
+# MC 本体或另一个客户端先占上），需要直接调 setsockopt。
+libc = { workspace = true }
 # store 落盘用 JSON（与配置同一套 serde，不引入新依赖）
 serde = { workspace = true }
 clap = { workspace = true }
