@@ -1,15 +1,14 @@
 name: Release
 
-# 发布一直有两大缺口：①三平台产物没有校验值，用户无法验证下载到的东西没被换过；
-# ②没有容器镜像。这个工作流一次补齐：
+# 发布产物的校验与签名：
 #   - 构建 Windows / Linux amd64 / Linux arm64 三个产物
 #   - 生成 SHA256SUMS + 用 cosign/sigstore 做无密钥签名（默认可用）
-#   - 上传 GitHub Release 并推 ghcr.io 镜像
+#   - 上传 GitHub Release
 # 触发：git tag v0.5.1 && git push --tags
 
 on:
   push:
-    tags: ["v*.*.*"]
+    tags: ["v*.*.*-*"]
   workflow_dispatch:
     inputs:
       tag:
@@ -18,7 +17,6 @@ on:
 
 permissions:
   contents: write
-  packages: write
   id-token: write # cosign 的 keyless signing 需要
 
 env:
@@ -60,6 +58,7 @@ jobs:
       - name: build --release
         env:
           CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE: ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
+          CROSS_TARGET_X86_64_UNKNOWN_LINUX_MUSL_IMAGE: ghcr.io/cross-rs/x86_64-unknown-linux-musl:main
         run: |
           if [ "$RUNNER_OS" = "Linux" ]; then
             cross build --release --workspace --target ${{ matrix.target }}
@@ -142,9 +141,9 @@ jobs:
           for f in *; do
             [ "$f" = "SHA256SUMS" ] && continue
             case "$f" in *.sig) continue ;; esac
-            cosign sign-blob --yes --output-signature "$f.sig" "$f"
+            cosign sign-blob --yes --bundle "$f.sig" "$f"
           done
-          cosign sign-blob --yes --output-signature SHA256SUMS.sig SHA256SUMS
+          cosign sign-blob --yes --bundle SHA256SUMS.sig SHA256SUMS
           echo "--- 签出来的文件 ---"
           ls -la *.sig
 
@@ -177,14 +176,14 @@ jobs:
             cosign verify-blob \
               --certificate-identity-regexp '^https://github.com/' \
               --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-              --signature "$sig" "$target"
+              --bundle "$sig" "$target"
           done
 
           # 3) SHA256SUMS 自身的签名也要验
           cosign verify-blob \
             --certificate-identity-regexp '^https://github.com/' \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            --signature SHA256SUMS.sig SHA256SUMS
+            --bundle SHA256SUMS.sig SHA256SUMS
           echo "全部签名验证通过"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -223,48 +222,3 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: false
 
-  docker:
-    name: push ghcr.io image
-    runs-on: ubuntu-latest
-    needs: build
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: resolve version
-        id: ver
-        # 手动触发时优先用输入的标签；GITHUB_REF_NAME 在 dispatch 下是**分支名**，
-        # 只有打 tag 触发时它才是标签，所以不能把它放在前面当首选。
-        #
-        # ★ v0.5.3：不再把 `${{ github.event.inputs.tag }}` 直接拼进 shell。
-        #   那是**表达式注入**面 —— 输入里带 `; rm -rf /` 之类会被当命令执行。
-        #   虽然说能触发 workflow_dispatch 的人本就有 write 权限（不是提权），
-        #   但没有理由留一个"参数能变成命令"的入口。
-        #   改成先经 env 传值（env 不参与 shell 解析），再做正则白名单校验。
-        env:
-          RAW_TAG: ${{ github.event.inputs.tag || github.ref_name }}
-        run: |
-          set -euo pipefail
-          tag="$RAW_TAG"
-          if ! printf '%s' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::标签格式非法（要求形如 v1.2.3）：$tag"
-            exit 1
-          fi
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-
-      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository }}:latest
-            ghcr.io/${{ github.repository }}:${{ steps.ver.outputs.tag }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
