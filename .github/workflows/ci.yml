@@ -67,18 +67,25 @@ jobs:
         timeout-minutes: 20
 
   # ---------------------------------------------------------------
-  # 交叉编译发布包（只做产物校验，不上传）
+  # 构建发布包（Linux 走 cross 交叉编译，Windows 原生）并上传为工件
   # 提前在 CI 里跑一遍，避免 tag 那天才发现某个目标平台编不过
   # ---------------------------------------------------------------
   cross-build:
-    name: cross build ${{ matrix.target }}
-    runs-on: ubuntu-latest
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
-          - target: aarch64-unknown-linux-musl
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            ext: ""
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            ext: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            ext: ".exe"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
@@ -86,6 +93,7 @@ jobs:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - uses: taiki-e/install-action@e407f7bafb71fd004bc5c2da3032e5470cbb6ef0 # v2
+        if: runner.os == 'Linux'
         with:
           tool: cross
 
@@ -93,8 +101,23 @@ jobs:
         env:
           CROSS_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_IMAGE: ghcr.io/cross-rs/aarch64-unknown-linux-musl:main
           CROSS_TARGET_X86_64_UNKNOWN_LINUX_MUSL_IMAGE: ghcr.io/cross-rs/x86_64-unknown-linux-musl:main
-        run: cross build --release --workspace --target ${{ matrix.target }}
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            cross build --release --workspace --target ${{ matrix.target }}
+          else
+            cargo build --release --workspace --target ${{ matrix.target }}
+          fi
         timeout-minutes: 30
+
+      - name: upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nfrp-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/nfrp-server${{ matrix.ext }}
+            target/${{ matrix.target }}/release/nfrp-client${{ matrix.ext }}
+          if-no-files-found: error
 
   # ---------------------------------------------------------------
   # 端到端冒烟：真跑一次 frps + frpc，验证 TCP / HTTP / stcp 转发能用
